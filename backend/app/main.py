@@ -72,6 +72,10 @@ class RequestSizeLimitMiddleware:
 
 
 def init_db():
+    """Initialize local development databases only; production uses reviewed SQL migrations."""
+    if settings.APP_ENV.strip().lower() in {"production", "prod"}:
+        logger.info("Skipping runtime schema initialization in production; apply SQL migrations before deployment")
+        return
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         ExecutionEngine.seed_problems_if_empty(db)

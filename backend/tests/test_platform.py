@@ -210,3 +210,13 @@ def test_stripe_checkout_does_not_grant_entitlement_until_subscription_active(mo
     assert active_event.status_code == 200
     subscription = client.get("/api/v1/subscriptions/me", headers=headers).json()
     assert subscription["plan"] == "pro" and subscription["status"] == "active"
+
+
+def test_production_skips_runtime_schema_creation(monkeypatch):
+    import app.main as main
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    def unexpected(*args, **kwargs):
+        raise AssertionError("production startup must not perform DDL or seed data")
+    monkeypatch.setattr(main.Base.metadata, "create_all", unexpected)
+    monkeypatch.setattr(main, "SessionLocal", unexpected)
+    main.init_db()

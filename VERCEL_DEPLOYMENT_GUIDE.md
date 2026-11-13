@@ -53,6 +53,7 @@ The SQL files are additive and intended to preserve existing rows. Run them agai
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/20261111_create_core_schema.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/20261112_add_coding_submission_user_id.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/20261113_add_platform_tables.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/20261114_seed_coding_catalog.sql
 ~~~
 
 On Windows PowerShell:
@@ -61,6 +62,7 @@ On Windows PowerShell:
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f backend/migrations/20261111_create_core_schema.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f backend/migrations/20261112_add_coding_submission_user_id.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f backend/migrations/20261113_add_platform_tables.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f backend/migrations/20261114_seed_coding_catalog.sql
 ~~~
 
 Before using an existing database, take a provider snapshot/backup and verify the current table definitions. These scripts do not remove or rewrite existing rows; however, CREATE TABLE IF NOT EXISTS does not reconcile a pre-existing table with a different column definition. Confirm schema compatibility before applying to any database containing pre-existing Saksham tables. Verify with:
