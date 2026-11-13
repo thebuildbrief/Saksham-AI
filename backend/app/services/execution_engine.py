@@ -3,8 +3,8 @@ Code Execution and Algorithmic Problem Service for SAKSHAM AI.
 Provides coding catalog, test case validation, and isolated execution.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
-import threading
 import time
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
@@ -16,7 +16,8 @@ from app.integrations.judge0_adapter import (
     JUDGE0_LANG_IDS,
     Judge0Adapter,
 )
-from app.core.config import settings
+from app.core.config import secret_value, settings
+from app.services.execution_quota import QuotaStoreUnavailable, acquire_execution_lease, release_execution_lease, _LOCAL_SLOTS as _EXECUTION_SLOTS
 from app.core.exceptions import ForbiddenException, NotFoundException, SakshamException
 
 SAMPLE_PROBLEMS = [
@@ -136,7 +137,6 @@ SAMPLE_PROBLEMS = [
     }
 ]
 
-_EXECUTION_SLOTS = threading.BoundedSemaphore(max(1, settings.CODE_MAX_CONCURRENT))
 MAX_OUTPUT_BYTES = 16 * 1024
 
 
@@ -176,12 +176,12 @@ class ExecutionEngine:
                     hints=json.dumps(prob["hints"])
                 )
                 db.add(p)
-                for tc in prob["test_cases"]:
+                for test_index, tc in enumerate(prob["test_cases"]):
                     t = CodingTestCase(
                         problem_id=prob["id"],
                         input_data=tc["input"],
                         expected_output=tc["output"],
-                        is_hidden=tc["is_hidden"]
+                        is_hidden=tc["is_hidden"], created_at=datetime.now(timezone.utc) + timedelta(microseconds=test_index)
                     )
                     db.add(t)
             db.commit()
@@ -210,8 +210,6 @@ class ExecutionEngine:
             raise NotFoundException("CodingProblem", problem_id)
         if language not in JUDGE0_LANG_IDS:
             raise SakshamException(422, "Unsupported programming language")
-        if not settings.JUDGE0_API_URL or not settings.JUDGE0_API_KEY:
-            raise SakshamException(503, "Code execution service is not configured")
 
         if session_id:
             session = db.query(InterviewSession).filter(InterviewSession.id == session_id).first()
@@ -219,6 +217,14 @@ class ExecutionEngine:
                 raise NotFoundException("InterviewSession", session_id)
             if session.user_id != user_id:
                 raise ForbiddenException("Interview session does not belong to the authenticated user")
+
+        if not settings.JUDGE0_API_URL or not secret_value(settings.JUDGE0_API_KEY):
+            raise SakshamException(503, "Code execution service is not configured")
+
+        try:
+            adapter = Judge0Adapter(settings.JUDGE0_API_URL, secret_value(settings.JUDGE0_API_KEY))
+        except ExecutionProviderError:
+            raise SakshamException(503, "Code execution service configuration is invalid") from None
 
         test_cases = db.query(CodingTestCase).filter(
             CodingTestCase.problem_id == problem_id
@@ -230,10 +236,13 @@ class ExecutionEngine:
             raise SakshamException(422, "Problem exceeds the maximum supported test-case count")
         if any(len(tc.input_data.encode("utf-8")) > 16 * 1024 for tc in test_cases):
             raise SakshamException(422, "A stored test case exceeds the 16 KiB input limit")
-        if not _EXECUTION_SLOTS.acquire(blocking=False):
+        try:
+            lease = await acquire_execution_lease(user_id)
+        except QuotaStoreUnavailable:
+            raise SakshamException(503, "Code execution capacity service is unavailable") from None
+        if lease is None:
             raise SakshamException(429, "Code execution capacity is busy; retry shortly")
 
-        adapter = Judge0Adapter(settings.JUDGE0_API_URL, settings.JUDGE0_API_KEY)
         cases = [None] if is_custom_run else test_cases
         deadline = time.monotonic() + settings.CODE_REQUEST_TIMEOUT_SECONDS
         test_results = []
@@ -261,6 +270,12 @@ class ExecutionEngine:
                     if any(len(value.encode("utf-8")) > MAX_OUTPUT_BYTES for value in (stdout, stderr, compile_output)):
                         raise ExecutionOutputLimitExceeded
                     case_status = result.get("status_desc", "Runtime Error")
+                    allowed_statuses = {
+                        "Accepted", "Time Limit Exceeded", "Compilation Error", "Runtime Error",
+                        "Memory Limit Exceeded", "Output Limit Exceeded",
+                    }
+                    if case_status not in allowed_statuses:
+                        case_status = "Runtime Error"
                     total_time_ms += int(result.get("time_ms", 0) or 0)
                     peak_memory_kb = max(peak_memory_kb, int(result.get("memory_kb", 0) or 0))
                     passed = (
@@ -270,20 +285,22 @@ class ExecutionEngine:
                     if not passed and execution_status == "Accepted":
                         execution_status = case_status if case_status != "Accepted" else "Wrong Answer"
                     outputs.append(stdout)
-                    errors.append(stderr or compile_output)
+                    case_error = stderr or compile_output
+                    errors.append(case_error)
                 except ExecutionOutputLimitExceeded:
                     case_status = "Output Limit Exceeded"
                     passed = False
                     stdout = ""
                     stderr = "Output limit exceeded"
+                    case_error = stderr
                     outputs.append(stdout)
                     errors.append(stderr)
                     if execution_status == "Accepted":
                         execution_status = case_status
                 except asyncio.TimeoutError as exc:
-                    raise SakshamException(503, "Code execution service timed out") from exc
-                except ExecutionProviderError as exc:
-                    raise SakshamException(503, "Code execution service is unavailable") from exc
+                    raise SakshamException(503, "Code execution service timed out") from None
+                except ExecutionProviderError:
+                    raise SakshamException(503, "Code execution service is unavailable") from None
 
                 if passed:
                     passed_count += 1
@@ -294,10 +311,13 @@ class ExecutionEngine:
                     "input_data": "[Hidden Test Case]" if is_hidden else case_input,
                     "expected_output": "[Hidden]" if is_hidden else (tc.expected_output if tc is not None else "Not graded"),
                     "actual_output": stdout if stdout else ("[Output limit exceeded]" if case_status == "Output Limit Exceeded" else ""),
-                    "error": (stderr or None) if not passed else None,
+                    "error": (case_error or None) if not passed else None,
                 })
         finally:
-            _EXECUTION_SLOTS.release()
+            try:
+                await release_execution_lease(lease)
+            except QuotaStoreUnavailable:
+                raise SakshamException(503, "Code execution capacity service is unavailable") from None
 
         total_count = len(cases)
         stdout = outputs[0] if outputs else ""
