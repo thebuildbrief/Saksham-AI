@@ -107,12 +107,20 @@ def test_test_cases_execute_independently_and_hidden_data_is_redacted(monkeypatc
 
     assert response.status_code == 200
     result = response.json()
-    assert seen_inputs == list(expected_by_input)
+    assert len(seen_inputs) == len(expected_by_input)
+    assert set(seen_inputs) == set(expected_by_input)
     assert result["status"] == "Accepted"
     assert result["passed_tests"] == result["total_tests"] == 3
-    hidden = result["test_results"][2]
+    assert len(result["test_results"]) == 3
+    hidden_results = [item for item in result["test_results"] if item["input_data"] == "[Hidden Test Case]"]
+    assert len(hidden_results) == 1
+    hidden = hidden_results[0]
     assert hidden["input_data"] == "[Hidden Test Case]"
     assert hidden["expected_output"] == "[Hidden]"
+    for item in result["test_results"]:
+        if item["input_data"] != "[Hidden Test Case]":
+            assert item["expected_output"] == expected_by_input[item["input_data"]]
+        assert item["passed"] is True
     assert "[3, 3]" not in response.text
     with SessionLocal() as db:
         submission = db.query(CodingSubmission).filter(CodingSubmission.code == source).one()
