@@ -220,3 +220,26 @@ def test_production_skips_runtime_schema_creation(monkeypatch):
     monkeypatch.setattr(main.Base.metadata, "create_all", unexpected)
     monkeypatch.setattr(main, "SessionLocal", unexpected)
     main.init_db()
+
+
+def test_s3_upload_omits_server_side_encryption_header(monkeypatch):
+    from app.services import object_storage
+
+    calls = {}
+
+    class FakeS3:
+        def put_object(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setattr(object_storage, "_s3_client", lambda: FakeS3())
+    monkeypatch.setattr(settings, "STORAGE_PROVIDER", "s3")
+    monkeypatch.setattr(settings, "STORAGE_S3_BUCKET", "private-test-bucket")
+
+    object_storage.put_object("user/resume.pdf", b"test resume", "application/pdf")
+
+    assert calls == {
+        "Bucket": "private-test-bucket",
+        "Key": "user/resume.pdf",
+        "Body": b"test resume",
+        "ContentType": "application/pdf",
+    }

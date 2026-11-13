@@ -24,7 +24,8 @@ def put_object(key: str, content: bytes, content_type: str) -> None:
     provider = settings.STORAGE_PROVIDER.lower()
     if provider == "s3":
         try:
-            _s3_client().put_object(Bucket=settings.STORAGE_S3_BUCKET, Key=key, Body=content, ContentType=content_type, ServerSideEncryption="AES256")
+            # R2 encrypts objects at rest by default and rejects the S3 SSE header.
+            _s3_client().put_object(Bucket=settings.STORAGE_S3_BUCKET, Key=key, Body=content, ContentType=content_type)
         except SakshamException:
             raise
         except Exception as exc:
